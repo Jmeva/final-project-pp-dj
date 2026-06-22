@@ -60,6 +60,7 @@ htmlcov/
 .cache
 nosetests.xml
 coverage.xml
+CLAUDE.md
 *.cover
 *.py,cover
 .hypothesis/
