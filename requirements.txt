@@ -1,0 +1,13 @@
+ipykernel==6.29.5
+jupyterlab==4.5.6
+numpy==2.2.4
+pandas==2.2.3
+pymc==5.28.4
+pymc_bart==0.11.0
+arviz==0.23.4
+graphviz>=0.21
+matplotlib>=3.10.8
+numpy>=2.0.0
+scikit-learn>=1.8.0
+scipy>=1.17
+seaborn>=0.13.2
