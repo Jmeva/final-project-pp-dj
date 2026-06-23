@@ -192,3 +192,10 @@ database.yaml
 
 /.quarto/
 
+# csv ignore
+data/
+!data/agg_folio_2018_2024.csv
+!data/agg_linea_2018_2024.csv
+!data/base_modelo_2019_2023.csv
+!data/IMSS_2019_ABRIL2024_ANUAL_SOLICITUD 330018024016695 ANEXO I.xlsx
+!data/IMSS_BIENESTAR_2017_ABRIL2024_ANUAL_SOLICITUD 330018024016695 ANEXO I.xlsx
