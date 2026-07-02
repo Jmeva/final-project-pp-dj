@@ -15,6 +15,8 @@ import pandas as pd
 
 _FIELD_ESTADO         = "estado"
 _FIELD_ANIO           = "anio"
+_FIELD_INSTITUCION    = "institucion"
+_FIELD_TIPO           = "tipo"
 _FIELD_MES            = "mes_num"
 _FIELD_NIVEL_ACCESO   = "nivel_acceso"
 _FIELD_NIVEL_COMPLETO = "Completo"
@@ -210,6 +212,76 @@ def build_model_inputs(df: pd.DataFrame) -> Dict[str, Any]:
         "coords": {
             "estados": estados,
             "anios":   anios,
+        },
+        "df_model": df_model,
+    }
+
+# ---------------------------------------------------------------------------
+# Función pública 3: construir inputs para el Modelo C (logístico jerárquico,
+# institución anidada en tipo civil/militar)
+# ---------------------------------------------------------------------------
+
+def build_model_inputs_c(df: pd.DataFrame) -> Dict[str, Any]:
+    """
+    Construye los arrays de índices y el dict de coordenadas para el Modelo C:
+    logit(theta) = beta0 + eff_estado[estado] + eff_anio[anio] + eff_inst[institucion]
+    eff_inst = eff_tipo[tipo de la institución] + z_inst * sigma_inst
+
+    Parámetros
+    ----------
+    df : DataFrame con columnas estado, anio, surtidas, total, institucion, tipo
+         (salida de load_all() en load_data_david.py)
+
+    Devuelve
+    --------
+    dict con:
+        estado_idx     : np.ndarray int — índice 0..n_estados-1, shape (N,)
+        anio_idx       : np.ndarray int — índice 0..n_anios-1, shape (N,)
+        inst_idx       : np.ndarray int — índice 0..n_instituciones-1, shape (N,)
+        inst_to_tipo   : np.ndarray int — índice de tipo (0/1) por institución, shape (n_instituciones,)
+        n_obs          : np.ndarray int — total de recetas, shape (N,)
+        k_obs          : np.ndarray int — recetas surtidas, shape (N,)
+        theta_obs      : np.ndarray float — tasa observada k/n, shape (N,)
+        coords         : dict — para pymc.Model(coords=...), incluye "estado", "anio", "institucion", "tipo"
+        df_model       : pd.DataFrame — tabla de nivel (estado, anio, institucion)
+    """
+    df_model = df.reset_index(drop=True)
+
+    estados       = sorted(df_model[_FIELD_ESTADO].unique())
+    anios         = sorted(df_model[_FIELD_ANIO].unique())
+    instituciones = sorted(df_model[_FIELD_INSTITUCION].unique())
+    tipos         = sorted(df_model[_FIELD_TIPO].unique())
+
+    estado_cat = pd.Categorical(df_model[_FIELD_ESTADO], categories=estados)
+    anio_cat   = pd.Categorical(df_model[_FIELD_ANIO], categories=anios)
+    inst_cat   = pd.Categorical(df_model[_FIELD_INSTITUCION], categories=instituciones)
+    tipo_cat   = pd.Categorical(df_model[_FIELD_TIPO], categories=tipos)
+
+    # Mapeo institución -> tipo (una fila por institución, en el mismo orden que `instituciones`)
+    inst_to_tipo_map = (
+        df_model.drop_duplicates(_FIELD_INSTITUCION)
+        .set_index(_FIELD_INSTITUCION)[_FIELD_TIPO]
+        .reindex(instituciones)
+    )
+    inst_to_tipo = pd.Categorical(inst_to_tipo_map, categories=tipos).codes.copy()
+
+    n_obs = df_model[_FIELD_TOTAL].to_numpy(dtype=int)
+    k_obs = df_model[_FIELD_SURTIDAS].to_numpy(dtype=int)
+
+    return {
+        "estado_idx":   estado_cat.codes.copy(),
+        "anio_idx":     anio_cat.codes.copy(),
+        "inst_idx":     inst_cat.codes.copy(),
+        "tipo_idx":     tipo_cat.codes.copy(),
+        "inst_to_tipo": inst_to_tipo,
+        "n_obs":        n_obs,
+        "k_obs":        k_obs,
+        "theta_obs":    k_obs / n_obs,
+        "coords": {
+            "estado":       estados,
+            "anio":         anios,
+            "institucion":  instituciones,
+            "tipo":         tipos,
         },
         "df_model": df_model,
     }
