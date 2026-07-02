@@ -140,3 +140,4 @@ websocket-client==1.9.0
 widgetsnbextension==4.0.15
 xarray==2026.4.0
 xarray-einstats==0.10.0
+IPython==9.14.1

@@ -1,17 +1,20 @@
 """
 Carga y normalización de datos de surtimiento de recetas.
 
-Tres fuentes:
-  - ISSSTE      : CSV agregado (mensual → anual)
-  - IMSS        : Excel hoja 'Recetas' (anual, 32 estados, 2019-2024*)
-  - IMSS Bienestar: Excel 4 hojas wide format (anual, 20 estados, 2017-2024*)
+Cinco fuentes:
+  - ISSSTE          : CSV agregado (mensual → anual)
+  - IMSS            : Excel hoja 'Recetas' (anual, 32 estados, 2019-2024*)
+  - IMSS Bienestar  : Excel 4 hojas wide format (anual, 20 estados, 2017-2024*)
+  - SEDENA          : Excel por hospital (anual, 24 estados, 2021-2023)
+  - SEMAR           : Excel pivote ancho, hoja 'DH' (anual, 18 estados, 2019-2023)
 
 * Datos de 2024 parciales (hasta abril).
 
-Salida unificada: estado, anio, surtidas, total, institucion
+Salida unificada: estado, anio, surtidas, total, institucion, tipo
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -40,6 +43,56 @@ _NORM_IMSS_BW: dict[str, str] = {
 }
 
 _COLS_OUT = ["estado", "anio", "surtidas", "total", "institucion"]
+
+_EXCLUIR_SEDENA = {"ESCALONES SANITARIOS", "RECETAS EXPEDIDAS", "TOTAL", "TOTAL GENERAL"}
+
+_SEDENA_LAYOUT = {
+    "2021": {"col_hospital": 3, "col_expedidas": 4, "col_surtidas": 6},
+    "2022": {"col_hospital": 1, "col_expedidas": 2, "col_surtidas": 3},
+    "2023": {"col_hospital": 1, "col_expedidas": 2, "col_surtidas": 3},
+}
+
+_ABREV_ESTADO_SEDENA: dict[str, str] = {
+    "SIN.": "SINALOA", "CHIH.": "CHIHUAHUA", "JAL.": "JALISCO", "GTO.": "GUANAJUATO",
+    "MEX.": "MÉXICO", "CD. MÉX.": "CDMX", "D.F.": "CDMX", "MOR.": "MORELOS",
+    "ZAC.": "ZACATECAS", "OAX.": "OAXACA", "VER.": "VERACRUZ", "TAB.": "TABASCO",
+    "CHIS.": "CHIAPAS", "TAMPS.": "TAMAULIPAS", "S.L.P.": "SAN LUIS POTOSI",
+    "GRO.": "GUERRERO", "DGO.": "DURANGO", "MICH.": "MICHOACÁN",
+    "Q. ROO.": "QUINTANA ROO", "B.C.": "BAJA CALIFORNIA", "SON.": "SONORA",
+    "COAH.": "COAHUILA", "YUC": "YUCATÁN", "PUE": "PUEBLA",
+}
+
+_MAPEO_MANUAL_SEDENA: dict[str, str] = {
+    "CENTRO DE REHABILITACIÓN INFANTIL": "CDMX",
+    "H. M. E. DE LA MUJ. Y NEONATOLOGIA.": "CDMX",
+    "H.M.Z CONTITUYENTES": "CDMX",  # typo de "CONSTITUYENTES"
+    "HOSP. CENTRAL MILITAR": "CDMX",
+    "U. M. C. E. DE LA S.D.N.": "CDMX",
+    "U.M.C.E. LEONES, TACUBA": "CDMX",
+    "UNIDAD ESP. MEDICAS.": "CDMX",
+    "UNIDAD ESP. ODONTOLOGICAS.": "CDMX",
+    "CHEMP. LOS PINOS, D.F. H.M.Z. CONSTITUYENTES": "CDMX",  # captura sucia: dos hospitales pegados
+    "HOSP.. MIL. DE ESPECIALIDADES DE  MONTERREY": "NUEVO LEÓN",
+    "H. M. R. DE EL CIPRES.": "BAJA CALIFORNIA",
+    "U. M. C. E. TECAMACHALCO, D.F.  (ORIENTAL, PUEBLA).": "PUEBLA",
+}
+
+_EXCLUIR_ESTADO_SEMAR = {
+    "ENTIDAD FEDERATIVA", "TOTAL PRIMER NIVEL", "TOTAL SEGUNDO NIVEL",
+    "TOTAL TERCER NIVEL", "TOTAL GLOBAL",
+}
+
+_NORM_SEMAR: dict[str, str] = {
+    "MICHOACAN": "MICHOACÁN",
+    "YUCATAN": "YUCATÁN",
+}
+
+_ANIO_MIN_SEMAR, _ANIO_MAX_SEMAR = 2019, 2023
+
+_TIPO_POR_INSTITUCION: dict[str, str] = {
+    "IMSS": "civil", "ISSSTE": "civil", "IMSS Bienestar": "civil",
+    "SEDENA": "militar", "SEMAR": "militar",
+}
 
 # ---------------------------------------------------------------------------
 # ISSSTE
@@ -140,6 +193,132 @@ def load_imss_bienestar(path: str | Path) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# SEDENA
+# ---------------------------------------------------------------------------
+
+def _limpiar_nombre_hospital(nombre: str) -> str:
+    """Quita sufijo de número romano al final (con o sin 'RM'), ej. ' I RM', ' XII'."""
+    return re.sub(r"\s*[IVXivx]+\s*(RM|-A)?\s*$", "", nombre.strip()).strip()
+
+
+def _extraer_estado_sedena(nombre: str) -> str | None:
+    for abrev, estado in _ABREV_ESTADO_SEDENA.items():
+        if nombre.upper().rstrip(".").endswith(abrev.rstrip(".")):
+            return estado
+    return None
+
+
+def _estado_de_hospital(nombre: str) -> str | None:
+    limpio = _limpiar_nombre_hospital(nombre)
+    return _extraer_estado_sedena(limpio) or _MAPEO_MANUAL_SEDENA.get(limpio)
+
+
+def _parse_sedena_sheet(xl: pd.ExcelFile, hoja: str) -> pd.DataFrame:
+    cfg = _SEDENA_LAYOUT[hoja]
+    raw = xl.parse(hoja, header=None)
+    data = raw.copy()
+    data["hospital_raw"] = data[cfg["col_hospital"]]
+    data = data[data["hospital_raw"].apply(lambda x: isinstance(x, str))].copy()
+    data["hospital"] = data["hospital_raw"].apply(_limpiar_nombre_hospital)
+    data = data[~data["hospital"].str.upper().isin(_EXCLUIR_SEDENA) & (data["hospital"] != "")]
+    data["total"] = pd.to_numeric(data[cfg["col_expedidas"]], errors="coerce")
+    data["surtidas"] = pd.to_numeric(data[cfg["col_surtidas"]], errors="coerce")
+    data["anio"] = int(hoja)
+    return data[["hospital", "anio", "surtidas", "total"]].dropna()
+
+
+def load_sedena(path: str | Path) -> pd.DataFrame:
+    """
+    Carga el Excel de SEDENA (hojas 2021-2023; 2024 se descarta por estar incompleto).
+
+    Los datos vienen por hospital, no por estado; se mapean con un catálogo
+    manual + reglas de abreviatura embebida en el nombre del hospital.
+    """
+    xl = pd.ExcelFile(Path(path))
+    partes = [_parse_sedena_sheet(xl, hoja) for hoja in ["2021", "2022", "2023"]]
+    df = pd.concat(partes, ignore_index=True)
+    df["estado"] = df["hospital"].apply(_estado_de_hospital)
+    if df["estado"].isna().any():
+        faltantes = df[df["estado"].isna()]["hospital"].unique()
+        raise ValueError(f"Hospitales SEDENA sin mapeo a estado: {faltantes}")
+    df_anual = df.groupby(["estado", "anio"], as_index=False)[["surtidas", "total"]].sum()
+    df_anual[["surtidas", "total"]] = df_anual[["surtidas", "total"]].astype(int)
+    df_anual["institucion"] = "SEDENA"
+    return df_anual[_COLS_OUT].reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------------
+# SEMAR
+# ---------------------------------------------------------------------------
+
+def _localizar_columnas_total_semar(df_raw: pd.DataFrame) -> dict[str, int]:
+    """
+    Por cada estado, ubica la columna con su total anual agregado.
+
+    Si el estado tiene más de un nivel de atención, usa la columna con
+    nivel == 'TOTAL' (ya suma todos los niveles); si solo tiene un nivel,
+    no existe esa columna y se usa su única columna 'TOTAL ANUAL'.
+    """
+    fila_estado = df_raw.iloc[6].ffill()
+    fila_nivel = df_raw.iloc[7]
+    fila_mes = df_raw.iloc[8]
+
+    estados = [e for e in fila_estado.dropna().unique() if e not in _EXCLUIR_ESTADO_SEMAR]
+
+    col_total_por_estado = {}
+    for estado in estados:
+        cols = [c for c in range(df_raw.shape[1]) if fila_estado[c] == estado]
+        col_nivel_total = [
+            c for c in cols
+            if isinstance(fila_nivel[c], str) and fila_nivel[c].strip().upper() == "TOTAL"
+        ]
+        if col_nivel_total:
+            col_total_por_estado[estado] = col_nivel_total[0]
+        else:
+            cols_anual = [
+                c for c in cols
+                if isinstance(fila_mes[c], str) and fila_mes[c].strip().upper() == "TOTAL ANUAL"
+            ]
+            col_total_por_estado[estado] = cols_anual[0]
+
+    return col_total_por_estado
+
+
+def load_semar(path: str | Path, hoja: str = "DH") -> pd.DataFrame:
+    """
+    Carga el Excel de SEMAR (hoja 'DH'), ventana 2019-2023.
+
+    hoja 'DH' = derechohabientes en general (fuente principal, confirmado
+    empíricamente como superset de 'MA').
+    """
+    raw = pd.read_excel(Path(path), sheet_name=hoja, header=None)
+    col_total_por_estado = _localizar_columnas_total_semar(raw)
+
+    registros = []
+    fila = 9
+    while fila < len(raw):
+        anio = raw.iloc[fila, 0]
+        if pd.isna(anio) or not isinstance(anio, (int, float)):
+            break
+        anio = int(anio)
+        if _ANIO_MIN_SEMAR <= anio <= _ANIO_MAX_SEMAR:
+            for estado, col in col_total_por_estado.items():
+                registros.append({
+                    "estado": estado,
+                    "anio": anio,
+                    "surtidas": raw.iloc[fila, col],
+                    "total": raw.iloc[fila + 3, col],
+                })
+        fila += 6
+
+    df = pd.DataFrame(registros)
+    df["estado"] = df["estado"].replace(_NORM_SEMAR)
+    df[["surtidas", "total"]] = df[["surtidas", "total"]].round().astype(int)
+    df["institucion"] = "SEMAR"
+    return df[_COLS_OUT].reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------------
 # Carga unificada
 # ---------------------------------------------------------------------------
 
@@ -148,7 +327,7 @@ def load_all(
     nivel_issste: str = "folio",
 ) -> pd.DataFrame:
     """
-    Carga y combina los tres datasets en un DataFrame unificado.
+    Carga y combina los cinco datasets en un DataFrame unificado.
 
     Parámetros
     ----------
@@ -157,20 +336,23 @@ def load_all(
 
     Devuelve
     --------
-    DataFrame con columnas: estado, anio, surtidas, total, institucion
+    DataFrame con columnas: estado, anio, surtidas, total, institucion, tipo
     """
     data_dir = Path(data_dir)
 
     csv_issste = data_dir / f"agg_{nivel_issste}_2018_2024.csv"
     xls_imss   = data_dir / "IMSS_2019_ABRIL2024_ANUAL_SOLICITUD 330018024016694 ANEXO I.xlsx"
     xls_bw     = data_dir / "IMSS_BIENESTAR_2017_ABRIL2024_ANUAL_SOLICITUD 330018024016695 ANEXO I.xlsx"
+    xls_sedena = data_dir / "SEDENA_2021_ABRIL2024_ANEXO FOLIO 330026424001543.xlsx"
+    xls_semar  = data_dir / "SEMAR_2017_ABRIL2024_ANEXO.xlsx"
 
     issste = load_issste(csv_issste)
     imss   = load_imss(xls_imss)
     bw     = load_imss_bienestar(xls_bw)
+    sedena = load_sedena(xls_sedena)
+    semar  = load_semar(xls_semar)
 
-    return (
-        pd.concat([issste, imss, bw], ignore_index=True)
-        .sort_values(["institucion", "estado", "anio"])
-        .reset_index(drop=True)
-    )
+    df = pd.concat([issste, imss, bw, sedena, semar], ignore_index=True)
+    df["tipo"] = df["institucion"].map(_TIPO_POR_INSTITUCION)
+
+    return df.sort_values(["institucion", "estado", "anio"]).reset_index(drop=True)
