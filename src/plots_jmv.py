@@ -222,3 +222,77 @@ def plot_escenarios_criticos(
     fig.tight_layout()
     
     return fig
+
+def plot_regression_bounds(
+    post: Dict[str, Any],
+    data: Dict[str, Any],
+    theta_posterior_fn: Callable, 
+    instituciones: List[str] = None,
+    hdi: float = 0.94,
+    figsize=(12, 5),
+) -> plt.Figure:
+    """
+    Regression bounds plot bayesiano con bandas visibles.
+
+    La banda HDI incluye eff_estado en el cálculo — captura la dispersión
+    geográfica real del modelo (variación entre los 32 estados). Esto produce
+    bandas visibles e interpretables: "rango donde cae el 94% de los estados
+    para esta institución y año".
+    """
+    df = data["df_model"]
+    anios = post["anios"]
+
+    if instituciones is None:
+        instituciones = post["insts"]
+
+    colores_inst = {
+        "ISSSTE": "#34d807", "IMSS": "#2563eb", "IMSS Bienestar": "#e9290b",
+        "SEDENA": "#073de1", "SEMAR": "#ef4444",
+    }
+
+    alpha_tail = (1 - hdi) / 2 * 100
+
+    fig, ax = plt.subplots(figsize=figsize)
+
+    for inst in instituciones:
+        color = colores_inst.get(inst, "#374151")
+        i = post["insts"].index(inst)
+
+        medias, los, his = [], [], []
+        for k, anio in enumerate(anios):
+            logit_mat = (
+                post["beta0"][:, None]            # (S, 1)
+                + post["eff_inst"][:, i, None]    # (S, 1)
+                + post["eff_anio"][:, k, None]    # (S, 1)
+                + post["eff_estado"]              # (S, n_estados)
+            )
+            theta_mat = 1 / (1 + np.exp(-logit_mat))  # (S, n_estados)
+            theta_flat = theta_mat.flatten()
+
+            medias.append(theta_flat.mean())
+            los.append(np.percentile(theta_flat, alpha_tail))
+            his.append(np.percentile(theta_flat, 100 - alpha_tail))
+
+        ax.fill_between(anios, los, his, alpha=0.25, color=color)
+        ax.plot(anios, medias, "o-", color=color, lw=2.5, ms=7, label=inst)
+
+        obs = (
+            df[df["institucion"] == inst]
+            .groupby("anio")
+            .apply(lambda x: x["surtidas"].sum() / x["total"].sum())
+        )
+        ax.scatter(obs.index, obs.values, color=color, s=60,
+                   marker="x", zorder=5, linewidths=2)
+
+    ax.set_xlabel("Año", fontsize=11)
+    ax.set_ylabel("θ (prob. surtimiento completo)", fontsize=11)
+    ax.set_title(
+        f"Regresión logística bayesiana — banda de credibilidad {int(hdi*100)}%\n"
+        "Media posterior por institución y año (× = promedio nacional observado)",
+        fontsize=12,
+    )
+    ax.set_xticks(anios)
+    ax.legend(fontsize=10)
+    fig.tight_layout()
+    
+    return fig

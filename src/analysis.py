@@ -227,7 +227,7 @@ def escenario(post: Dict[str, Any], inst: str, estado: str, anio: int) -> Dict[s
         "p_receta_incompleta": 1 - theta.mean(),
     }
 
-def declaraciones_politica_publica(post: Dict[str, Any]) -> List[Dict[str, str]]:
+# def declaraciones_politica_publica(post: Dict[str, Any]) -> List[Dict[str, str]]:
     """
     Declaraciones con certeza posterior cuantificada
 
